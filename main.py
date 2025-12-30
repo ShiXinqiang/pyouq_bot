@@ -18,8 +18,8 @@ from config import (
     TOKEN, 
     CHOOSING, 
     GETTING_POST,
-    WAITING_CAPTION,      # 新增
-    CONFIRM_SUBMISSION,   # 新增
+    WAITING_CAPTION,
+    CONFIRM_SUBMISSION,
     BROWSING_POSTS, 
     BROWSING_COLLECTIONS,
     COMMENTING,
@@ -30,10 +30,10 @@ from database import setup_database, close_pool
 from handlers.start_menu import start, back_to_main
 from handlers.submission import (
     prompt_submission, 
-    handle_media_input,       # 原 handle_new_post 改名，处理初始输入
-    handle_add_caption_choice, # 处理是否加文案的选择
-    handle_caption_text,       # 处理补发的文案文本
-    handle_confirm_submission, # 处理最终确认
+    handle_media_input,
+    handle_add_caption_choice,
+    handle_caption_text,
+    handle_confirm_submission,
     navigate_my_posts, 
     show_my_collections, 
     prompt_delete_work,
@@ -55,7 +55,7 @@ logger = logging.getLogger(__name__)
 
 def main():
     """
-    机器人主程序 (V10.5 - 投稿流程优化版)
+    机器人主程序 (V10.6 - UX极致优化版)
     """
     USE_PROXY = False 
     PROXY_URL = "http://127.0.0.1:7890"
@@ -69,7 +69,11 @@ def main():
 
     # 主对话处理器
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
+        entry_points=[
+            CommandHandler("start", start),
+            # 【修复】这里添加 back_to_main，确保流程结束(END)后点击按钮依然能触发主菜单
+            CallbackQueryHandler(back_to_main, pattern='^back_to_main$')
+        ],
         states={
             CHOOSING: [
                 CallbackQueryHandler(prompt_submission, pattern='^submit_post$'),
@@ -77,25 +81,23 @@ def main():
                 CallbackQueryHandler(show_my_collections, pattern='^my_collections_page:'),
             ],
             
-            # 阶段1：接收初始投稿（图片/视频/文字）
+            # 发布流程
             GETTING_POST: [
                 MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, handle_media_input),
+                # 允许在发图阶段直接点击返回
+                CallbackQueryHandler(back_to_main, pattern='^back_to_main$') 
             ],
-            
-            # 阶段2：用户决定是否补发文案
             WAITING_CAPTION: [
-                # 用户点击了“我要加文案” -> 等待文本
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_caption_text),
-                # 用户点击了“直接发送”或“添加文案”的按钮
-                CallbackQueryHandler(handle_add_caption_choice, pattern='^(add_caption_yes|add_caption_no)$')
+                CallbackQueryHandler(handle_add_caption_choice, pattern='^(add_caption_yes|add_caption_no)$'),
+                CallbackQueryHandler(back_to_main, pattern='^back_to_main$')
             ],
-            
-            # 阶段3：最终确认
             CONFIRM_SUBMISSION: [
-                CallbackQueryHandler(handle_confirm_submission, pattern='^(confirm_send|confirm_cancel)$')
+                CallbackQueryHandler(handle_confirm_submission, pattern='^(confirm_send|confirm_cancel)$'),
+                CallbackQueryHandler(back_to_main, pattern='^back_to_main$')
             ],
 
-            # --- 以下保持不变 ---
+            # 浏览/管理流程
             BROWSING_POSTS: [
                 CallbackQueryHandler(navigate_my_posts, pattern='^my_posts_page:'),
                 CallbackQueryHandler(prompt_delete_work, pattern='^delete_work_prompt:'),
@@ -112,12 +114,16 @@ def main():
                 MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_delete_comment_input)
             ],
             DELETING_WORK: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_delete_work_input)
+                MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_delete_work_input),
+                # 允许在删除输入阶段点击返回
+                CallbackQueryHandler(back_to_main, pattern='^back_to_main$')
             ]
         },
         fallbacks=[
             CommandHandler("cancel", cancel),
-            CommandHandler("start", start)
+            CommandHandler("start", start),
+            # 【兜底】防止任何状态下卡住
+            CallbackQueryHandler(back_to_main, pattern='^back_to_main$')
         ],
         allow_reentry=True,
         per_chat=True,
@@ -136,7 +142,7 @@ def main():
     
     application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, debug_handler), group=999)
     
-    logger.info("🚀 机器人 V10.5 启动成功！(优化投稿流程)")
+    logger.info("🚀 机器人 V10.6 启动成功！(界面洁癖优化+全流程返回)")
     
     try:
         application.run_polling(drop_pending_updates=True)
