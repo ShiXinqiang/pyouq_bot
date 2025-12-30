@@ -5,14 +5,14 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
-from config import CHANNEL_ID, BOT_USERNAME
+from config import CHANNEL_ID, CHANNEL_USERNAME, BOT_USERNAME
 from database import get_pool
 
 logger = logging.getLogger(__name__)
 
 
 async def handle_approval(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """处理审核群的'通过'按钮 (V10.4)"""
+    """处理审核群的'通过'按钮"""
     query = update.callback_query
     await query.answer()
 
@@ -29,7 +29,7 @@ async def handle_approval(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         msg_id = sent_message.message_id
         
-        # 2. 提取原始内容
+        # 2. 提取原始内容 (保持不变)
         admin_message = query.message
         content_to_save = ""
         original_caption = ""
@@ -43,7 +43,7 @@ async def handle_approval(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 content_to_save = caption_parts[1]
                 original_caption = caption_parts[1]
         
-        # 3. 获取投稿者信息并构建页脚
+        # 3. 构建页脚 (保持不变)
         try:
             submitter = await context.bot.get_chat(user_id)
             author_username = submitter.username or ""
@@ -52,7 +52,6 @@ async def handle_approval(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             author_username = ""
             author_name = "匿名用户"
         
-        # 构建页脚链接
         if author_username:
             author_link = f'👤 作者: <a href="https://t.me/{author_username}">{author_name}</a>'
         else:
@@ -60,10 +59,9 @@ async def handle_approval(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         
         my_link = f'<a href="https://t.me/{BOT_USERNAME}?start=main">📱 我的</a>'
         footer = f"\n\n━━━━━━━━━━━━━━\n{author_link}  |  {my_link}"
-        
         full_caption = (original_caption or "") + footer
         
-        # 4. 保存到数据库（只保存原始内容）
+        # 4. 保存到数据库 (保持不变)
         pool = await get_pool()
         async with pool.acquire() as conn:
             await conn.execute(
@@ -71,7 +69,7 @@ async def handle_approval(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 user_id, author_name, msg_id, content_to_save
             )
         
-        # 5. 编辑频道消息，添加互动按钮（两行布局）
+        # 5. 编辑频道消息按钮 (保持不变)
         keyboard = [
             [
                 InlineKeyboardButton(f"👍 赞 0", callback_data=f"react:like:{msg_id}"),
@@ -99,8 +97,17 @@ async def handle_approval(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             parse_mode=ParseMode.HTML
         )
         
-        # 7. 通知投稿者
-        await context.bot.send_message(chat_id=user_id, text="🎉 恭喜！您的作品已被采纳发布。")
+        # 7. 【新功能】通知投稿者，并带上跳转按钮
+        post_url = f"https://t.me/{CHANNEL_USERNAME}/{msg_id}"
+        user_notify_markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔗 前往查看信息", url=post_url)]
+        ])
+        
+        await context.bot.send_message(
+            chat_id=user_id, 
+            text="🎉 恭喜！您的作品已审核通过并发布。",
+            reply_markup=user_notify_markup
+        )
         
     except Exception as e:
         logger.error(f"审核通过失败: {e}")
@@ -112,7 +119,7 @@ async def handle_rejection(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     query = update.callback_query
     await query.answer()
 
-    action, user_id_str, message_id_str = query.data.split(':')
+    user_id_str = query.data.split(':')[1]
     user_id = int(user_id_str)
 
     original_caption = query.message.caption or ""
