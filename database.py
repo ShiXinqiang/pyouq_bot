@@ -29,7 +29,7 @@ async def close_pool():
 async def setup_database(application: Application) -> None:
     pool = await get_pool()
     async with pool.acquire() as conn:
-        # 增加 parent_id 字段
+        # 1. 建表 (如果不存在)
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS comments (
                 id SERIAL PRIMARY KEY,
@@ -37,12 +37,20 @@ async def setup_database(application: Application) -> None:
                 user_id BIGINT NOT NULL,
                 user_name TEXT NOT NULL,
                 comment_text TEXT NOT NULL,
-                parent_id BIGINT,  -- 新增：父评论ID
+                parent_id BIGINT,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         
-        # 其他表保持不变...
+        # 2. 【关键修复】强制检查并添加字段 (自动迁移)
+        try:
+            await conn.execute('ALTER TABLE comments ADD COLUMN IF NOT EXISTS parent_id BIGINT')
+            await conn.execute('CREATE INDEX IF NOT EXISTS idx_comments_parent ON comments(parent_id)')
+            logger.info("✅ 数据库迁移成功: 已添加 parent_id 字段")
+        except Exception as e:
+            logger.warning(f"⚠️ 数据库迁移检查: {e}")
+
+        # ... (其他表保持不变)
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS submissions (
                 id SERIAL PRIMARY KEY, 
@@ -81,4 +89,4 @@ async def setup_database(application: Application) -> None:
             )
         ''')
         
-        logger.info("数据库结构初始化完成 (V10.7 楼中楼版)。")
+        logger.info("数据库结构初始化完成。")
