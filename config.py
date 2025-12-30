@@ -20,9 +20,11 @@ except KeyError as e:
 (
     CHOOSING, 
     GETTING_POST, 
+    WAITING_CAPTION,      # <--- 新增：等待补发文案
+    CONFIRM_SUBMISSION,   # <--- 新增：等待最终确认
     BROWSING_POSTS, 
     BROWSING_COLLECTIONS, 
     COMMENTING,
     DELETING_COMMENT,
-    DELETING_WORK  # <--- 新增这个状态
-) = range(7)
+    DELETING_WORK
+) = range(9)
