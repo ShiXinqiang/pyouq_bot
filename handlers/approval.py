@@ -1,18 +1,18 @@
 # handlers/approval.py
 
-import aiosqlite
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
-from config import CHANNEL_ID, DB_NAME, BOT_USERNAME
+from config import CHANNEL_ID, BOT_USERNAME
+from database import get_pool
 
 logger = logging.getLogger(__name__)
 
 
 async def handle_approval(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """处理审核群的"通过"按钮 (V10.4)"""
+    """处理审核群的'通过'按钮 (V10.4)"""
     query = update.callback_query
     await query.answer()
 
@@ -64,12 +64,12 @@ async def handle_approval(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         full_caption = (original_caption or "") + footer
         
         # 4. 保存到数据库（只保存原始内容）
-        async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute(
-                "INSERT INTO submissions (user_id, user_name, channel_message_id, content_text) VALUES (?, ?, ?, ?)",
-                (user_id, author_name, msg_id, content_to_save)
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO submissions (user_id, user_name, channel_message_id, content_text) VALUES ($1, $2, $3, $4)",
+                user_id, author_name, msg_id, content_to_save
             )
-            await db.commit()
         
         # 5. 编辑频道消息，添加互动按钮（两行布局）
         keyboard = [
@@ -100,7 +100,7 @@ async def handle_approval(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         
         # 7. 通知投稿者
-        await context.bot.send_message(chat_id=user_id, text="🎉 恭喜！您的投稿已被采纳发布。")
+        await context.bot.send_message(chat_id=user_id, text="🎉 恭喜！您的作品已被采纳发布。")
         
     except Exception as e:
         logger.error(f"审核通过失败: {e}")
@@ -108,7 +108,7 @@ async def handle_approval(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def handle_rejection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """处理审核群的"拒绝"按钮"""
+    """处理审核群的'拒绝'按钮"""
     query = update.callback_query
     await query.answer()
 
@@ -121,4 +121,4 @@ async def handle_rejection(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         parse_mode=ParseMode.HTML
     )
     
-    await context.bot.send_message(chat_id=user_id, text="很抱歉，您的投稿未通过审核。")
+    await context.bot.send_message(chat_id=user_id, text="很抱歉，您的作品未通过审核。")
