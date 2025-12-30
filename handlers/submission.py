@@ -3,7 +3,7 @@
 import math
 import logging
 import asyncio
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, InputMediaVideo
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes, ConversationHandler
 from telegram.error import TelegramError
@@ -11,8 +11,8 @@ from telegram.error import TelegramError
 from config import (
     ADMIN_GROUP_ID, 
     GETTING_POST, 
-    WAITING_CAPTION,      # 新状态
-    CONFIRM_SUBMISSION,   # 新状态
+    WAITING_CAPTION,      
+    CONFIRM_SUBMISSION,   
     CHANNEL_USERNAME, 
     CHANNEL_ID,
     CHOOSING, 
@@ -24,7 +24,7 @@ from database import get_pool
 
 logger = logging.getLogger(__name__)
 
-# ================== 数据库与工具函数 (保持不变) ==================
+# ================== 数据库与工具函数 ==================
 
 async def delete_post_data(conn, channel_message_id: int):
     """级联删除所有相关数据"""
@@ -98,10 +98,7 @@ async def prompt_submission(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     """开始投稿"""
     query = update.callback_query
     await query.answer()
-    
-    # 清理旧数据
     context.user_data.pop('submission_data', None)
-    
     await query.edit_message_text(
         "📝 <b>开始投稿</b>\n\n"
         "请发送您的作品（图片、视频或文字）。\n"
@@ -115,18 +112,14 @@ async def handle_media_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     """阶段1：接收用户发送的媒体"""
     message = update.message
     
-    # 暂存消息ID，方便后续复制
     context.user_data['submission_data'] = {
         'message_id': message.message_id,
         'chat_id': message.chat_id,
-        'caption': message.caption or message.text or "" # 此时已有的文案
+        'caption': message.caption or message.text or ""
     }
 
-    # 情况 A：已经带了文案，或者是纯文本 -> 直接进确认页
     if message.caption or message.text:
         return await show_confirmation_menu(update, context)
-    
-    # 情况 B：只有图片/视频，没有文案 -> 询问是否添加
     else:
         keyboard = [
             [InlineKeyboardButton("📝 添加文案", callback_data='add_caption_yes')],
@@ -142,44 +135,31 @@ async def handle_media_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def handle_add_caption_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """阶段2：处理按钮选择（添加文案 vs 直接发送）"""
     query = update.callback_query
     await query.answer()
-    
     choice = query.data
-    
     if choice == 'add_caption_yes':
         await query.edit_message_text("✍️ 好的，请直接回复您想添加的文案内容：")
         return WAITING_CAPTION
-        
     elif choice == 'add_caption_no':
-        # 用户确认不加文案，直接去确认页
         return await show_confirmation_menu(update, context)
 
 
 async def handle_caption_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """阶段2.5：接收用户补发的文案"""
     text = update.message.text
-    
-    # 更新暂存的数据
     if 'submission_data' in context.user_data:
         context.user_data['submission_data']['caption'] = text
-        
     await update.message.reply_text("✅ 文案已添加！正在生成预览...")
     return await show_confirmation_menu(update, context)
 
 
 async def show_confirmation_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """阶段3：展示最终预览并确认"""
     data = context.user_data.get('submission_data')
     if not data:
         msg = update.message or update.callback_query.message
         await msg.reply_text("❌ 数据已过期，请重新投稿。")
         return ConversationHandler.END
 
-    # 这里的技巧：使用 copy_message 把用户最开始发的那个媒体复制回来
-    # 但是替换掉它的 caption (如果有新文案)
-    
     msg_to_reply = update.message or update.callback_query.message
     chat_id = msg_to_reply.chat_id
     
@@ -192,12 +172,11 @@ async def show_confirmation_menu(update: Update, context: ContextTypes.DEFAULT_T
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     try:
-        # 发送预览
         await context.bot.copy_message(
             chat_id=chat_id,
             from_chat_id=data['chat_id'],
             message_id=data['message_id'],
-            caption=preview_caption, # 覆盖原caption，显示预览
+            caption=preview_caption,
             parse_mode=ParseMode.HTML,
             reply_markup=reply_markup
         )
@@ -215,26 +194,14 @@ async def handle_confirm_submission(update: Update, context: ContextTypes.DEFAUL
     await query.answer()
     
     action = query.data
-    
     if action == 'confirm_cancel':
         await query.edit_message_caption("❌ 投稿已取消。")
         context.user_data.pop('submission_data', None)
         return ConversationHandler.END
         
-    # 执行发送逻辑
     data = context.user_data.get('submission_data')
-    user = query.from_user
-    
-    # 构建给管理员看的按钮
-    # 注意：message_id 先用 0 占位，发过去后无法获取，这里我们主要利用 user_id
-    # 实际 message_id 需要等管理员审核完发到频道后才生成
-    # 但审核逻辑里 approve_callback_data 依赖原始 message_id，这里稍微复杂点
-    # 简单做法：我们直接把带最终文案的消息发给管理员
-    
-    # 重新构建给管理员的 ID 标记
-    # 这里有点特殊：因为 copy_message 生成了新消息，我们得把这个新消息的 ID 传给管理员按钮
-    # 但我们不能在这里预知。
-    # 解决办法：我们把这个 copy 动作放在这里做。
+    # 这里的 user 是点击按钮的人（通常就是投稿人）
+    user = query.from_user 
     
     user_info = f"<b>投稿人:</b> {user.full_name} (@{user.username})\n<b>ID:</b> <code>{user.id}</code>"
     final_caption = data['caption']
@@ -250,9 +217,15 @@ async def handle_confirm_submission(update: Update, context: ContextTypes.DEFAUL
         )
         
         # 2. 给这条管理员群的消息加上审核按钮
-        # 此时 sent_msg.message_id 就是审核通过/拒绝时需要操作的 ID
-        approve_btn = f"approve:{user.id}:{sent_msg.message_id}"
-        decline_btn = f"decline:{user.id}:{sent_msg.message_id}"
+        # 【关键修复】：这里必须使用 data['chat_id'] 和 data['message_id']
+        # 这样 approval.py 才能正确从用户的私聊中复制原始内容
+        # data['chat_id'] 就是用户的 ID
+        
+        original_user_id = data['chat_id']
+        original_msg_id = data['message_id']
+        
+        approve_btn = f"approve:{original_user_id}:{original_msg_id}"
+        decline_btn = f"decline:{original_user_id}:{original_msg_id}"
         
         markup = InlineKeyboardMarkup([[
             InlineKeyboardButton("✅ 通过", callback_data=approve_btn),
@@ -281,16 +254,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return ConversationHandler.END
 
 
-# ================== 我的作品列表 (保持不变) ==================
-# 此处为了节省篇幅，省略 navigate_my_posts, verify_and_clean_posts 等代码
-# 请保留你上一次修改好的 navigate_my_posts 等所有列表管理代码！
-# 它们与投稿流程是独立的，不需要修改。
-# 务必把上一次完全修复好的列表代码复制到这里下面。
-
-# ... (请在此处粘贴 navigate_my_posts, verify_and_clean_posts, prompt_delete_work 等所有列表相关代码) ...
-# 如果你没有备份，我可以再发一次完整的包含列表功能的代码。
-
-# 为了确保代码完整性，这里我把列表相关的代码也放进去，保持你之前的修复成果：
+# ================== 我的作品列表 ==================
 
 async def navigate_my_posts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
