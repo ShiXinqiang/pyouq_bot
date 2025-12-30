@@ -14,10 +14,13 @@ try:
     CHANNEL_USERNAME = os.environ['CHANNEL_USERNAME']
     DISCUSSION_GROUP_ID = int(os.environ['DISCUSSION_GROUP_ID'])
     BOT_USERNAME = os.environ['BOT_USERNAME']
-    DB_NAME = "submissions.db"
+    
+    # 获取 Railway 的数据库连接字符串
+    # 格式通常为: postgresql://user:password@host:port/database
+    DATABASE_URL = os.environ['DATABASE_URL'] 
 
 except KeyError as e:
-    raise RuntimeError(f"错误: 关键环境变量 {e} 缺失！请检查 .env 文件。")
+    raise RuntimeError(f"错误: 关键环境变量 {e} 缺失！请检查 .env 文件或 Railway 变量设置。")
 
 
 # --- 对话状态定义 ---
