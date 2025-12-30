@@ -6,7 +6,7 @@ import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes, ConversationHandler
-from telegram.error import TelegramError
+from telegram.error import TelegramError, BadRequest
 
 from config import (
     ADMIN_GROUP_ID, 
@@ -34,26 +34,27 @@ async def delete_post_data(conn, channel_message_id: int):
     await conn.execute("DELETE FROM submissions WHERE channel_message_id = $1", channel_message_id)
 
 
-# ================== 核心工具：直接在频道检测 (通过刷新按钮) ==================
+# ================== 核心工具：直接在频道检测 (修复并发问题版) ==================
 
-async def check_channel_post_directly(context: ContextTypes.DEFAULT_TYPE, conn, post):
+async def check_channel_post_directly(context: ContextTypes.DEFAULT_TYPE, pool, post):
     """
     直接尝试在频道内刷新该消息的按钮。
-    如果消息被删，API 会返回 'message not found'，此时我们清理数据库。
+    修复：接收 pool 而不是 conn，每个任务独立获取连接，避免 InterfaceError。
     """
     msg_id = post['channel_message_id']
     
-    # 1. 获取最新的互动数据（构建按钮用）
-    # 这一步是必须的，因为我们要假装去"更新"按钮，顺便检测消息在不在
-    rows = await conn.fetch("SELECT reaction_type, COUNT(*) as count FROM reactions WHERE channel_message_id = $1 GROUP BY reaction_type", msg_id)
-    counts = {row['reaction_type']: row['count'] for row in rows}
-    likes = counts.get(1, 0)
-    dislikes = counts.get(-1, 0)
+    # 1. 获取最新的互动数据
+    # 使用独立的连接上下文，用完即还，避免并发冲突
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT reaction_type, COUNT(*) as count FROM reactions WHERE channel_message_id = $1 GROUP BY reaction_type", msg_id)
+        counts = {row['reaction_type']: row['count'] for row in rows}
+        likes = counts.get(1, 0)
+        dislikes = counts.get(-1, 0)
+        
+        col_count = await conn.fetchval("SELECT COUNT(*) FROM collections WHERE channel_message_id = $1", msg_id) or 0
+        com_count = await conn.fetchval("SELECT COUNT(*) FROM comments WHERE channel_message_id = $1", msg_id) or 0
     
-    col_count = await conn.fetchval("SELECT COUNT(*) FROM collections WHERE channel_message_id = $1", msg_id) or 0
-    com_count = await conn.fetchval("SELECT COUNT(*) FROM comments WHERE channel_message_id = $1", msg_id) or 0
-    
-    # 2. 构建键盘 (保持和频道里的一致)
+    # 2. 构建键盘
     keyboard = [
         [
             InlineKeyboardButton(f"👍 赞 {likes}", callback_data=f"react:like:{msg_id}"),
@@ -67,62 +68,61 @@ async def check_channel_post_directly(context: ContextTypes.DEFAULT_TYPE, conn, 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     try:
-        # 3. 【关键动作】尝试编辑频道消息的按钮
-        # 这一步直接与频道交互。
+        # 3. 尝试编辑频道消息的按钮
+        # 这一步不需要数据库连接，是纯网络请求
         await context.bot.edit_message_reply_markup(
             chat_id=CHANNEL_ID,
             message_id=msg_id,
             reply_markup=reply_markup
         )
-        return post # 成功（或者未修改），说明消息存在
+        return post # 消息存在
         
     except TelegramError as e:
         error_str = str(e).lower()
         
-        # 4. 【判定逻辑】
-        # 如果消息被管理员删了，Telegram 100% 会返回 "message to edit not found"
-        if "message to edit not found" in error_str or "message not found" in error_str:
-            logger.info(f"🗑️ [直接检测] 频道消息 {msg_id} 已消失，正在从数据库移除...")
-            return None # 返回 None，表示需要删除
+        # 4. 判定逻辑
+        # 包括 "message to edit not found", "message not found", 以及 "message_id_invalid"
+        if "not found" in error_str or "deleted" in error_str or "message_id_invalid" in error_str:
+            logger.info(f"🗑️ [直接检测] 频道消息 {msg_id} 已失效 ({error_str})，标记为删除...")
+            return None # 标记删除
             
-        # 如果是 "message is not modified" (内容没变)，说明消息好好的，只是数据没变
+        # 如果是 "message is not modified"，说明消息存在
         if "message is not modified" in error_str:
             return post
             
-        # 其他网络错误，保守起见保留
         logger.warning(f"⚠️ 检测消息 {msg_id} 时遇到意外错误: {e}")
         return post
 
 
 async def verify_and_clean_posts(context: ContextTypes.DEFAULT_TYPE, raw_posts, pool):
     """
-    批量执行检测
+    批量执行检测 (并发安全版)
     """
+    tasks = []
+    # 这里不要 acquire conn，而是把 pool 传给子任务
+    for post in raw_posts:
+        tasks.append(check_channel_post_directly(context, pool, post))
+    
+    # 并发执行所有检测
+    results = await asyncio.gather(*tasks)
+    
     valid_posts = []
     ids_to_delete = []
-
-    # 使用同一个连接进行批量检测
-    async with pool.acquire() as conn:
-        tasks = []
-        for post in raw_posts:
-            # 为每个帖子创建一个检测任务
-            tasks.append(check_channel_post_directly(context, conn, post))
-        
-        # 并发执行所有检测
-        results = await asyncio.gather(*tasks)
-        
-        # 整理结果
-        for original_post, result in zip(raw_posts, results):
-            if result:
-                valid_posts.append(result)
-            else:
-                ids_to_delete.append(original_post['channel_message_id'])
-        
-        # 统一删除失效数据
-        if ids_to_delete:
+    
+    # 整理结果
+    for original_post, result in zip(raw_posts, results):
+        if result:
+            valid_posts.append(result)
+        else:
+            ids_to_delete.append(original_post['channel_message_id'])
+    
+    # 统一删除失效数据
+    if ids_to_delete:
+        # 这里单独获取一个连接来执行删除操作
+        async with pool.acquire() as conn:
             for mid in ids_to_delete:
                 await delete_post_data(conn, mid)
-            logger.info(f"♻️ 已清理 {len(ids_to_delete)} 条无效作品。")
+        logger.info(f"♻️ 已清理 {len(ids_to_delete)} 条无效作品。")
 
     return valid_posts
 
@@ -188,6 +188,7 @@ async def navigate_my_posts(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     posts_per_page = 10
 
     pool = await get_pool()
+    # 1. 获取数据的连接
     async with pool.acquire() as conn:
         total_posts = await conn.fetchval(
             "SELECT COUNT(*) FROM submissions WHERE user_id = $1", 
@@ -213,7 +214,7 @@ async def navigate_my_posts(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             user_id, posts_per_page, offset
         )
 
-    # 【关键修改】调用新的检测逻辑
+    # 2. 【关键修改】执行检测 (传入 pool，不传入 conn)
     valid_posts = await verify_and_clean_posts(context, raw_posts, pool)
     
     try:
@@ -251,7 +252,6 @@ async def navigate_my_posts(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if target_page > 1:
         nav_buttons.append(InlineKeyboardButton("⬅️ 上一页", callback_data=f'my_posts_page:{target_page - 1}'))
     
-    # 简单的分页判断
     if len(valid_posts) == posts_per_page or (total_pages > target_page):
         nav_buttons.append(InlineKeyboardButton("下一页 ➡️", callback_data=f'my_posts_page:{target_page + 1}'))
     
@@ -272,7 +272,7 @@ async def navigate_my_posts(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     return BROWSING_POSTS
 
 
-# ================== 手动删除作品逻辑 (更新：也使用直接检测) ==================
+# ================== 手动删除作品逻辑 ==================
 
 async def prompt_delete_work(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
