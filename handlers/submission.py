@@ -1,6 +1,5 @@
 # handlers/submission.py
 
-import aiosqlite
 import math
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
@@ -9,12 +8,12 @@ from telegram.ext import ContextTypes, ConversationHandler
 from config import (
     ADMIN_GROUP_ID, 
     GETTING_POST, 
-    DB_NAME, 
     CHANNEL_USERNAME, 
     CHOOSING, 
     BROWSING_POSTS, 
     BROWSING_COLLECTIONS
 )
+from database import get_pool
 
 
 async def prompt_submission(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -51,7 +50,7 @@ async def handle_new_post(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             reply_markup=reply_markup,
             parse_mode=ParseMode.HTML
         )
-        await message.reply_text("✅ 您的投稿已成功提交审核。")
+        await message.reply_text("✅ 您的作品已成功提交审核。")
     except Exception as e:
         await message.reply_text(f"❌ 抱歉，提交失败: {e}")
 
@@ -65,7 +64,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 async def navigate_my_posts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """查询并展示"我的朋友圈"分页记录"""
+    """查询并展示'我的朋友圈'分页记录"""
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
@@ -73,12 +72,12 @@ async def navigate_my_posts(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     target_page = int(query.data.split(':')[1])
     posts_per_page = 10
 
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute(
-            "SELECT COUNT(*) FROM submissions WHERE user_id = ?", 
-            (user_id,)
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        total_posts = await conn.fetchval(
+            "SELECT COUNT(*) FROM submissions WHERE user_id = $1", 
+            user_id
         )
-        total_posts = (await cursor.fetchone())[0]
         
         if total_posts == 0:
             await query.edit_message_text(
@@ -90,15 +89,14 @@ async def navigate_my_posts(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         total_pages = math.ceil(total_posts / posts_per_page)
         offset = (target_page - 1) * posts_per_page
         
-        cursor = await db.execute(
-            "SELECT content_text, timestamp, channel_message_id FROM submissions WHERE user_id = ? ORDER BY timestamp DESC LIMIT ? OFFSET ?",
-            (user_id, posts_per_page, offset)
+        posts = await conn.fetch(
+            "SELECT content_text, timestamp, channel_message_id FROM submissions WHERE user_id = $1 ORDER BY timestamp DESC LIMIT $2 OFFSET $3",
+            user_id, posts_per_page, offset
         )
-        posts = await cursor.fetchall()
 
     response_text = f"您的朋友圈记录 (第 {target_page}/{total_pages} 页)：\n\n"
     for i, post in enumerate(posts):
-        content, timestamp, msg_id = post
+        content, timestamp, msg_id = post # asyncpg Record 支持解包
         post_text = (content or "[媒体文件]").strip().replace('<', '&lt;').replace('>', '&gt;')
         if len(post_text) > 20: 
             post_text = post_text[:20] + "..."
@@ -129,7 +127,7 @@ async def navigate_my_posts(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 async def show_my_collections(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """查询并展示"我的收藏"分页记录"""
+    """查询并展示'我的收藏'分页记录"""
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
@@ -137,12 +135,12 @@ async def show_my_collections(update: Update, context: ContextTypes.DEFAULT_TYPE
     target_page = int(query.data.split(':')[1])
     posts_per_page = 10
 
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute(
-            "SELECT COUNT(*) FROM collections WHERE user_id = ?", 
-            (user_id,)
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        total_posts = await conn.fetchval(
+            "SELECT COUNT(*) FROM collections WHERE user_id = $1", 
+            user_id
         )
-        total_posts = (await cursor.fetchone())[0]
 
         if total_posts == 0:
             await query.edit_message_text(
@@ -154,15 +152,14 @@ async def show_my_collections(update: Update, context: ContextTypes.DEFAULT_TYPE
         total_pages = math.ceil(total_posts / posts_per_page)
         offset = (target_page - 1) * posts_per_page
 
-        cursor = await db.execute(
+        posts = await conn.fetch(
             """
             SELECT s.content_text, s.timestamp, s.channel_message_id
             FROM collections c JOIN submissions s ON c.channel_message_id = s.channel_message_id
-            WHERE c.user_id = ? ORDER BY c.timestamp DESC LIMIT ? OFFSET ?
+            WHERE c.user_id = $1 ORDER BY c.timestamp DESC LIMIT $2 OFFSET $3
             """,
-            (user_id, posts_per_page, offset)
+            user_id, posts_per_page, offset
         )
-        posts = await cursor.fetchall()
     
     response_text = f"您的收藏 (第 {target_page}/{total_pages} 页)：\n\n"
     for i, post in enumerate(posts):
