@@ -24,7 +24,16 @@ from database import get_pool
 
 logger = logging.getLogger(__name__)
 
-# ================== 数据库与工具函数 ==================
+# ================== 辅助函数：安全删除消息 ==================
+async def safe_delete_message(bot, chat_id, message_id):
+    """尝试删除消息，忽略错误"""
+    if not message_id: return
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass
+
+# ================== 数据库与工具函数 (保持不变) ==================
 
 async def delete_post_data(conn, channel_message_id: int):
     """级联删除所有相关数据"""
@@ -92,15 +101,19 @@ async def verify_and_clean_posts(context: ContextTypes.DEFAULT_TYPE, raw_posts, 
     return valid_posts
 
 
-# ================== 新版投稿流程 ==================
+# ================== 新版发布流程 (含自动清理) ==================
 
 async def prompt_submission(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """开始投稿"""
+    """开始发布"""
     query = update.callback_query
     await query.answer()
     context.user_data.pop('submission_data', None)
+    
+    # 记录当前菜单消息ID，如果后面要删可以用
+    context.user_data['last_bot_msg'] = query.message.message_id
+    
     await query.edit_message_text(
-        "📝 <b>开始投稿</b>\n\n"
+        "📝 <b>开始发布</b>\n\n"
         "请发送您的作品（图片、视频或文字）。\n"
         "💡 小提示：您可以直接在图片中附带文案，也可以发完图片后单独发文案。",
         parse_mode=ParseMode.HTML
@@ -112,11 +125,17 @@ async def handle_media_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     """阶段1：接收用户发送的媒体"""
     message = update.message
     
+    # 保存信息
     context.user_data['submission_data'] = {
         'message_id': message.message_id,
         'chat_id': message.chat_id,
         'caption': message.caption or message.text or ""
     }
+
+    # 尝试删除上一条机器人的提示消息 ("请发送您的作品...")
+    # 注意：这里我们不删除用户发的图片，因为用户可能想留底
+    last_msg_id = context.user_data.get('last_bot_msg')
+    await safe_delete_message(context.bot, message.chat_id, last_msg_id)
 
     if message.caption or message.text:
         return await show_confirmation_menu(update, context)
@@ -124,13 +143,14 @@ async def handle_media_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         keyboard = [
             [InlineKeyboardButton("📝 添加文案", callback_data='add_caption_yes')],
             [InlineKeyboardButton("🚀 直接发送 (无文案)", callback_data='add_caption_no')],
-            [InlineKeyboardButton("❌ 取消投稿", callback_data='confirm_cancel')]
+            [InlineKeyboardButton("❌ 取消发布", callback_data='confirm_cancel')]
         ]
-        await message.reply_text(
-            "👀 收到图片/视频，但没有附带文案。\n\n"
+        sent_msg = await message.reply_text(
+            "👀 收到内容，但没有附带文案。\n\n"
             "您想要补充一段文字说明吗？",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
+        context.user_data['last_bot_msg'] = sent_msg.message_id
         return WAITING_CAPTION
 
 
@@ -138,32 +158,50 @@ async def handle_add_caption_choice(update: Update, context: ContextTypes.DEFAUL
     query = update.callback_query
     await query.answer()
     choice = query.data
+    
     if choice == 'add_caption_yes':
         await query.edit_message_text("✍️ 好的，请直接回复您想添加的文案内容：")
+        context.user_data['last_bot_msg'] = query.message.message_id
         return WAITING_CAPTION
+        
     elif choice == 'add_caption_no':
+        # 删除之前的询问菜单，保持干净
+        await safe_delete_message(context.bot, query.message.chat_id, query.message.message_id)
         return await show_confirmation_menu(update, context)
 
 
 async def handle_caption_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     text = update.message.text
+    chat_id = update.message.chat_id
+    
+    # 1. 删除用户发的这条纯文案消息 (清理垃圾)
+    await safe_delete_message(context.bot, chat_id, update.message.message_id)
+    
+    # 2. 删除机器人上一条提示 ("请直接回复...")
+    last_msg_id = context.user_data.get('last_bot_msg')
+    await safe_delete_message(context.bot, chat_id, last_msg_id)
+    
     if 'submission_data' in context.user_data:
         context.user_data['submission_data']['caption'] = text
-    await update.message.reply_text("✅ 文案已添加！正在生成预览...")
+        
+    # 发送一个临时的“正在处理”提示，然后马上进入预览
+    temp_msg = await update.message.reply_text("✅ 文案已添加！生成预览中...")
+    # 稍微等一下或者直接删掉都行，show_confirmation_menu 会发新的
+    await safe_delete_message(context.bot, chat_id, temp_msg.message_id)
+    
     return await show_confirmation_menu(update, context)
 
 
 async def show_confirmation_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     data = context.user_data.get('submission_data')
+    # 这里可能是 message 回调，也可能是 callback query
+    chat_id = update.effective_chat.id
+    
     if not data:
-        msg = update.message or update.callback_query.message
-        await msg.reply_text("❌ 数据已过期，请重新投稿。")
+        await context.bot.send_message(chat_id=chat_id, text="❌ 数据已过期，请重新发布。")
         return ConversationHandler.END
 
-    msg_to_reply = update.message or update.callback_query.message
-    chat_id = msg_to_reply.chat_id
-    
-    preview_caption = f"📄 <b>投稿预览</b>\n\n{data['caption']}\n\n━━━━━━━━━━━━━━\n👆 最终效果如上，确认发布吗？"
+    preview_caption = f"📄 <b>发布预览</b>\n\n{data['caption']}\n\n━━━━━━━━━━━━━━\n👆 最终效果如上，确认发布吗？"
     
     keyboard = [
         [InlineKeyboardButton("✅ 确认发布", callback_data='confirm_send')],
@@ -172,7 +210,7 @@ async def show_confirmation_menu(update: Update, context: ContextTypes.DEFAULT_T
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     try:
-        await context.bot.copy_message(
+        sent_msg = await context.bot.copy_message(
             chat_id=chat_id,
             from_chat_id=data['chat_id'],
             message_id=data['message_id'],
@@ -180,6 +218,8 @@ async def show_confirmation_menu(update: Update, context: ContextTypes.DEFAULT_T
             parse_mode=ParseMode.HTML,
             reply_markup=reply_markup
         )
+        # 记录预览消息ID，以便确认后删除或编辑
+        context.user_data['last_bot_msg'] = sent_msg.message_id
     except Exception as e:
         logger.error(f"预览发送失败: {e}")
         await context.bot.send_message(chat_id=chat_id, text="❌ 预览生成失败，请重试。")
@@ -194,20 +234,25 @@ async def handle_confirm_submission(update: Update, context: ContextTypes.DEFAUL
     await query.answer()
     
     action = query.data
+    
+    # 无论确认还是取消，都先把那个巨大的预览消息删掉，或者编辑成简单的提示
+    # 这里选择编辑成简单的提示，因为用户可能想确认结果
+    
     if action == 'confirm_cancel':
-        await query.edit_message_caption("❌ 投稿已取消。")
+        # 删除预览的大图消息
+        await safe_delete_message(context.bot, query.message.chat_id, query.message.message_id)
+        await context.bot.send_message(chat_id=query.message.chat_id, text="❌ 发布已取消。")
         context.user_data.pop('submission_data', None)
         return ConversationHandler.END
         
     data = context.user_data.get('submission_data')
-    # 这里的 user 是点击按钮的人（通常就是投稿人）
     user = query.from_user 
     
-    user_info = f"<b>投稿人:</b> {user.full_name} (@{user.username})\n<b>ID:</b> <code>{user.id}</code>"
+    user_info = f"<b>发布人:</b> {user.full_name} (@{user.username})\n<b>ID:</b> <code>{user.id}</code>"
     final_caption = data['caption']
     
     try:
-        # 1. 复制消息给管理员 (使用最终文案)
+        # 1. 复制消息给管理员
         sent_msg = await context.bot.copy_message(
             chat_id=ADMIN_GROUP_ID,
             from_chat_id=data['chat_id'],
@@ -216,11 +261,7 @@ async def handle_confirm_submission(update: Update, context: ContextTypes.DEFAUL
             parse_mode=ParseMode.HTML
         )
         
-        # 2. 给这条管理员群的消息加上审核按钮
-        # 【关键修复】：这里必须使用 data['chat_id'] 和 data['message_id']
-        # 这样 approval.py 才能正确从用户的私聊中复制原始内容
-        # data['chat_id'] 就是用户的 ID
-        
+        # 2. 加上审核按钮
         original_user_id = data['chat_id']
         original_msg_id = data['message_id']
         
@@ -238,7 +279,17 @@ async def handle_confirm_submission(update: Update, context: ContextTypes.DEFAUL
             reply_markup=markup
         )
         
-        await query.edit_message_caption("✅ <b>投稿成功！</b>\n\n您的作品已提交审核，请耐心等待。", parse_mode=ParseMode.HTML)
+        # 删除预览消息，只发一个干净的成功提示
+        await safe_delete_message(context.bot, query.message.chat_id, query.message.message_id)
+        
+        # 发送成功提示，并带上返回菜单按钮
+        success_kb = [[InlineKeyboardButton("⬅️ 返回主菜单", callback_data='back_to_main')]]
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="✅ <b>提交成功！</b>\n\n您的作品已提交审核，请耐心等待。",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(success_kb)
+        )
         
     except Exception as e:
         logger.error(f"提交审核失败: {e}")
@@ -254,7 +305,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return ConversationHandler.END
 
 
-# ================== 我的作品列表 ==================
+# ================== 我的作品列表 (保持不变) ==================
 
 async def navigate_my_posts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
@@ -310,25 +361,39 @@ async def prompt_delete_work(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = update.callback_query
     await query.answer()
     context.user_data['delete_work_page'] = int(query.data.split(':')[1])
-    await query.edit_message_text(f"🗑️ <b>删除模式</b>\n\n请回复您要删除的作品序号。\n该作品将从机器人记录和频道中<b>永久删除</b>。\n\n回复 /cancel 取消。", parse_mode=ParseMode.HTML)
+    
+    # 记录提示消息ID，方便删除
+    msg = await query.edit_message_text(f"🗑️ <b>删除模式</b>\n\n请回复您要删除的作品序号。\n该作品将从机器人记录和频道中<b>永久删除</b>。\n\n回复 /cancel 取消。", parse_mode=ParseMode.HTML)
+    context.user_data['last_bot_msg'] = msg.message_id
+    
     return DELETING_WORK
 
 async def handle_delete_work_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.message.from_user.id
     text = update.message.text.strip()
+    chat_id = update.message.chat_id
+    
+    # 1. 删除用户输入的数字
+    await safe_delete_message(context.bot, chat_id, update.message.message_id)
+    # 2. 删除机器人的提示 ("请回复序号...")
+    await safe_delete_message(context.bot, chat_id, context.user_data.get('last_bot_msg'))
+    
     if not text.isdigit():
-        await update.message.reply_text("❌ 请输入数字序号。")
+        msg = await update.message.reply_text("❌ 请输入数字序号。")
+        context.user_data['last_bot_msg'] = msg.message_id
         return DELETING_WORK
     offset = int(text) - 1
     if offset < 0:
-         await update.message.reply_text("❌ 序号无效。")
+         msg = await update.message.reply_text("❌ 序号无效。")
+         context.user_data['last_bot_msg'] = msg.message_id
          return DELETING_WORK
 
     pool = await get_pool()
     async with pool.acquire() as conn:
         target_post = await conn.fetchrow("SELECT id, channel_message_id, content_text FROM submissions WHERE user_id = $1 ORDER BY timestamp DESC LIMIT 1 OFFSET $2", user_id, offset)
         if not target_post:
-            await update.message.reply_text("❌ 找不到该序号对应的作品。")
+            msg = await update.message.reply_text("❌ 找不到该序号对应的作品。")
+            context.user_data['last_bot_msg'] = msg.message_id
             return DELETING_WORK 
         channel_msg_id = target_post['channel_message_id']
         content_preview = (target_post['content_text'] or "媒体作品")[:20]
@@ -340,14 +405,16 @@ async def handle_delete_work_input(update: Update, context: ContextTypes.DEFAULT
                 if "not found" in str(e).lower(): logger.info("频道消息已不存在")
                 else: telegram_deleted = False
             await delete_post_data(conn, channel_msg_id)
-            msg = f"✅ 已删除作品：{content_preview}..."
-            await update.message.reply_text(msg)
+            
+            # 删除成功后显示结果，并带返回按钮
+            msg_text = f"✅ 已删除作品：{content_preview}..."
+            await update.message.reply_text(msg_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ 返回主菜单", callback_data='back_to_main')]]))
+            
         except Exception as e:
             logger.error(f"删除过程出错: {e}")
             await update.message.reply_text("❌ 删除时发生系统错误。")
 
     context.user_data.pop('delete_work_page', None)
-    await update.message.reply_text("输入 /start 返回主菜单查看更新后的列表。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ 返回主菜单", callback_data='back_to_main')]]))
     return ConversationHandler.END
 
 async def show_my_collections(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
