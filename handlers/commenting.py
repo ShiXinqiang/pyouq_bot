@@ -1,13 +1,13 @@
 # handlers/commenting.py
 
-import aiosqlite
 import logging
 from telegram import Update
 from telegram.ext import ContextTypes, ConversationHandler
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
 
-from config import DB_NAME, COMMENTING, CHANNEL_USERNAME
+from config import COMMENTING, CHANNEL_USERNAME
+from database import get_pool
 
 logger = logging.getLogger(__name__)
 
@@ -43,30 +43,29 @@ async def handle_new_comment(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("❌ 操作超时或出现错误，请回到频道重试。")
         return ConversationHandler.END
 
-    async with aiosqlite.connect(DB_NAME) as db:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
         # 保存评论
-        await db.execute(
-            "INSERT INTO comments (channel_message_id, user_id, user_name, comment_text) VALUES (?, ?, ?, ?)",
-            (message_id, user.id, user.full_name, comment_text)
+        await conn.execute(
+            "INSERT INTO comments (channel_message_id, user_id, user_name, comment_text) VALUES ($1, $2, $3, $4)",
+            message_id, user.id, user.full_name, comment_text
         )
-        await db.commit()
         
         # 获取作者信息并发送通知
-        cursor = await db.execute(
-            "SELECT user_id, content_text FROM submissions WHERE channel_message_id = ?",
-            (message_id,)
+        post_info = await conn.fetchrow(
+            "SELECT user_id, content_text FROM submissions WHERE channel_message_id = $1",
+            message_id
         )
-        post_info = await cursor.fetchone()
 
     await update.message.reply_text("✅ 评论成功！\n\n帖子的评论数将在下次有人互动时更新。")
 
     # 发送通知给作者
     if post_info:
-        author_id, content_text = post_info
+        author_id = post_info['user_id']
+        content_text = post_info['content_text']
         
         # 不给自己发通知
         if author_id != user.id:
-            # 生成链接
             post_url = f"https://t.me/{CHANNEL_USERNAME}/{message_id}"
             actor_link = f'<a href="tg://user?id={user.id}">{user.full_name}</a>'
             
