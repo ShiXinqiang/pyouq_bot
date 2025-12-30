@@ -1,7 +1,7 @@
 # main.py
 
 import logging
-import os
+import asyncio
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -9,10 +9,10 @@ from telegram.ext import (
     MessageHandler,
     ConversationHandler,
     filters,
+    ContextTypes,
 )
 from telegram.request import HTTPXRequest
 from telegram import Update
-from telegram.ext import ContextTypes
 
 from config import (
     TOKEN, 
@@ -23,7 +23,8 @@ from config import (
     COMMENTING,
     DELETING_COMMENT
 )
-from database import setup_database
+# 注意：这里导入了 setup_database 和 close_pool
+from database import setup_database, close_pool
 from handlers.start_menu import start, back_to_main
 from handlers.submission import (
     prompt_submission, 
@@ -47,11 +48,12 @@ logger = logging.getLogger(__name__)
 
 def main():
     """
-    机器人主程序 (V10.4.1 - 完全修复版)
+    机器人主程序 (V10.4.1 - PostgreSQL Railway版)
     """
     
     # 代理配置
-    USE_PROXY = False # 改为 False 如果不需要代理 True
+    # 注意：在 Railway 等云环境部署时，通常不需要代理，请保持为 False
+    USE_PROXY = False 
     PROXY_URL = "http://127.0.0.1:7890"
     
     # 构建 Application
@@ -64,6 +66,7 @@ def main():
     else:
         logger.info("🌐 不使用代理")
     
+    # 初始化时连接数据库
     application = builder.post_init(setup_database).build()
 
     # 主对话处理器
@@ -119,13 +122,21 @@ def main():
     
     application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, debug_handler), group=999)
     
-    logger.info("🚀 机器人 V10.4.1 启动成功！")
+    logger.info("🚀 机器人 V10.4.1 (PostgreSQL版) 启动成功！")
     logger.info("✨ 功能：互动通知 + 文本删除评论 + 100赞自动置顶")
     
     try:
         application.run_polling(drop_pending_updates=True)
     except Exception as e:
         logger.error(f"❌ 机器人运行错误: {e}")
+    finally:
+        # 确保关闭数据库连接池
+        logger.info("正在关闭数据库连接池...")
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            loop.create_task(close_pool())
+        else:
+            loop.run_until_complete(close_pool())
 
 
 if __name__ == '__main__':
