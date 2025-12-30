@@ -1,4 +1,4 @@
-aiosqlite
+# requirements.txt
 python-telegram-bot
 pyrogram
 tgcrypto
@@ -7,3 +7,4 @@ APScheduler
 SQLAlchemy
 psycopg2-binary
 aiohttp
+asyncpg
